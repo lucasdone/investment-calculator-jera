@@ -23,6 +23,10 @@ export default function Home() {
     annualRate: '12',
   })
 
+  const [submitted, setSubmitted] = useState(false)
+  const [savedOk, setSavedOk] = useState(false)
+  const [saving, setSaving] = useState(false)
+
   const parsed = useMemo(() => {
     const initialAmount = Number(form.initialAmount)
     const monthlyContribution = form.monthlyContribution === '' ? 0 : Number(form.monthlyContribution)
@@ -39,9 +43,12 @@ export default function Home() {
     return { initialAmount, monthlyContribution, months, annualRate, errors }
   }, [form])
 
-  const [submitted, setSubmitted] = useState(false)
+  function onChange<K extends keyof FormState>(key: K, value: FormState[K]) {
+    setForm((prev) => ({ ...prev, [key]: value }))
+  }
 
-  const result = useMemo(() => {
+  // RF (resultado principal)
+  const fixedResult = useMemo(() => {
     if (!submitted) return null
     if (parsed.errors.length) return null
 
@@ -53,8 +60,9 @@ export default function Home() {
     })
   }, [submitted, parsed])
 
-  const rvResults = useMemo(() => {
-    if (!result) return null
+  // RVs por cenário
+  const variableResults = useMemo(() => {
+    if (!fixedResult) return null
 
     const input = {
       initialAmount: parsed.initialAmount,
@@ -63,36 +71,109 @@ export default function Home() {
     }
 
     return RV_SCENARIOS.map((scenario) => simulateVariableIncome(input, scenario))
-  }, [result, parsed])
+  }, [fixedResult, parsed])
 
+  // Comparações RF vs RV (bruto e líquido)
   const comparisons = useMemo(() => {
-    if (!result || !rvResults) return null
+    if (!fixedResult || !variableResults) return null
 
     return compareRfVsRvs({
-      rfFinalGross: result.finalAmount,
-      rfFinalNet: result.netFinalAmount,
-      rvs: rvResults.map((rv) => ({
+      rfFinalGross: fixedResult.finalAmount,
+      rfFinalNet: fixedResult.netFinalAmount,
+      rvs: variableResults.map((rv) => ({
         scenarioId: rv.scenarioId,
         scenarioLabel: rv.scenarioLabel,
         finalGross: rv.finalAmount,
         finalNet: rv.finalAmount, // RV sem impostos por enquanto
       })),
     })
-  }, [result, rvResults])
+  }, [fixedResult, variableResults])
 
-  function onChange<K extends keyof FormState>(key: K, value: FormState[K]) {
-    setForm((prev) => ({ ...prev, [key]: value }))
+  async function saveSimulation(payload: any) {
+    const res = await fetch('/api/simulations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: form.name,
+        payload,
+      }),
+    })
+
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(text || 'Failed to save simulation')
+    }
+
+    return res.json()
   }
 
-  function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
-    setSubmitted(true)
-  }
 
-  const percentDiff = useMemo(() => {
-    // nessa etapa só RF existe; deixamos 0 e depois substituímos ao implementar RV
-    return 0
-  }, [])
+    setSubmitted(true)
+    setSavedOk(false)
+
+    if (parsed.errors.length) return
+
+    // Recalcula no submit para garantir que salvamos um snapshot consistente
+    const fixed = simulateFixedIncome({
+      initialAmount: parsed.initialAmount,
+      monthlyContribution: parsed.monthlyContribution,
+      months: parsed.months,
+      annualRate: parsed.annualRate,
+    })
+
+    const rvInput = {
+      initialAmount: parsed.initialAmount,
+      monthlyContribution: parsed.monthlyContribution,
+      months: parsed.months,
+    }
+
+    const variable = RV_SCENARIOS.map((scenario) => simulateVariableIncome(rvInput, scenario))
+
+    const comparisonsLocal = compareRfVsRvs({
+      rfFinalGross: fixed.finalAmount,
+      rfFinalNet: fixed.netFinalAmount,
+      rvs: variable.map((rv) => ({
+        scenarioId: rv.scenarioId,
+        scenarioLabel: rv.scenarioLabel,
+        finalGross: rv.finalAmount,
+        finalNet: rv.finalAmount,
+      })),
+    })
+
+    const payload = {
+      inputs: {
+        name: form.name,
+        initialAmount: parsed.initialAmount,
+        monthlyContribution: parsed.monthlyContribution,
+        months: parsed.months,
+        rfAnnualRate: parsed.annualRate,
+        rvScenarios: RV_SCENARIOS,
+      },
+      outputs: {
+        fixed,
+        variable,
+        comparisons: comparisonsLocal,
+      },
+      assumptions: {
+        daysApproximation: 'months * 30',
+        variableIncomeTax: 'not applied (not specified)',
+      },
+      createdAtClient: new Date().toISOString(),
+    }
+
+    try {
+      setSaving(true)
+      await saveSimulation(payload)
+      setSavedOk(true)
+    } catch (err) {
+      console.error('Save failed:', err)
+      setSavedOk(false)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <main className="min-h-screen p-6">
@@ -100,7 +181,7 @@ export default function Home() {
         <header className="space-y-1">
           <h1 className="text-2xl font-semibold">Calculadora de Investimentos</h1>
           <p className="text-sm text-muted-foreground">
-            UI mínima (Renda Fixa) — impostos IOF → IR aplicados conforme regras.
+            RF com impostos (IOF → IR) + cenários RV (RV1–RV3) e comparação vs RF.
           </p>
         </header>
 
@@ -162,10 +243,13 @@ export default function Home() {
             <div className="md:col-span-2 flex items-center gap-3">
               <button
                 type="submit"
-                className="rounded-md bg-black px-4 py-2 text-white hover:opacity-90"
+                disabled={saving}
+                className="rounded-md bg-black px-4 py-2 text-white hover:opacity-90 disabled:opacity-60"
               >
-                Simular
+                {saving ? 'Salvando...' : 'Simular e salvar'}
               </button>
+
+              {savedOk && <span className="text-sm text-green-600">Salvo!</span>}
 
               {submitted && parsed.errors.length > 0 && (
                 <div className="text-sm text-red-600">
@@ -178,38 +262,33 @@ export default function Home() {
           </form>
         </section>
 
-        {result && (
+        {fixedResult && (
           <section className="rounded-lg border p-4 space-y-4">
             <div className="flex flex-col gap-1">
               <h2 className="text-lg font-medium">Resultado — {form.name}</h2>
               <p className="text-sm text-muted-foreground">
-                Prazo: {result.days} dias (premissa: meses × 30)
+                Prazo: {fixedResult.days} dias (premissa: meses × 30)
               </p>
             </div>
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-              <Metric label="Total aportado" value={brl(result.totalContributed)} />
-              <Metric label="Valor final bruto" value={brl(result.finalAmount)} />
-              <Metric label="Lucro bruto" value={brl(result.grossProfit)} />
+              <Metric label="Total aportado" value={brl(fixedResult.totalContributed)} />
+              <Metric label="Valor final bruto (RF)" value={brl(fixedResult.finalAmount)} />
+              <Metric label="Lucro bruto (RF)" value={brl(fixedResult.grossProfit)} />
             </div>
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-              <Metric label={`IOF (${pct(result.taxes.iofRate)})`} value={brl(result.taxes.iofAmount)} />
-              <Metric label={`IR (${pct(result.taxes.irRate)})`} value={brl(result.taxes.irAmount)} />
-              <Metric label="Lucro líquido" value={brl(result.taxes.netProfit)} />
-              <Metric label="Valor final líquido" value={brl(result.netFinalAmount)} />
+              <Metric label={`IOF (${pct(fixedResult.taxes.iofRate)})`} value={brl(fixedResult.taxes.iofAmount)} />
+              <Metric label={`IR (${pct(fixedResult.taxes.irRate)})`} value={brl(fixedResult.taxes.irAmount)} />
+              <Metric label="Lucro líquido (RF)" value={brl(fixedResult.taxes.netProfit)} />
+              <Metric label="Valor final líquido (RF)" value={brl(fixedResult.netFinalAmount)} />
             </div>
 
-            <div className="text-sm text-muted-foreground">
-              Diferença percentual entre cenários (RF vs RV): <strong>{percentDiff}%</strong>{' '}
-              <span>(RV será implementada no próximo passo)</span>
-            </div>
-
-              <div className="mt-6 space-y-3">
+            <div className="mt-6 space-y-3">
               <h3 className="text-base font-medium">Renda Variável (cenários)</h3>
 
               <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                {rvResults?.map((rv) => (
+                {variableResults?.map((rv) => (
                   <div key={rv.scenarioId} className="rounded-md border p-3">
                     <div className="text-xs text-muted-foreground">
                       {rv.scenarioId} — {rv.scenarioLabel}
@@ -271,5 +350,9 @@ function brl(value: number) {
 }
 
 function pct(value: number) {
-  return new Intl.NumberFormat('pt-BR', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'percent',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value)
 }
