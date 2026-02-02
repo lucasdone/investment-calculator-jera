@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import { simulateFixedIncome } from '../lib/calculations/fixedIncome'
 import { RV_SCENARIOS } from '../lib/calculations/rvScenarios'
 import { simulateVariableIncome } from '../lib/calculations/variableIncome'
@@ -26,6 +26,10 @@ export default function Home() {
   const [submitted, setSubmitted] = useState(false)
   const [savedOk, setSavedOk] = useState(false)
   const [saving, setSaving] = useState(false)
+
+  const [savedList, setSavedList] = useState<Array<{ id: string; name: string; createdAt: string }>>([])
+  const [listLoading, setListLoading] = useState(false)
+  const [listError, setListError] = useState<string | null>(null)
 
   const parsed = useMemo(() => {
     const initialAmount = Number(form.initialAmount)
@@ -107,6 +111,28 @@ export default function Home() {
     return res.json()
   }
 
+  async function loadSimulations() {
+    try {
+      setListLoading(true)
+      setListError(null)
+
+      const res = await fetch('/api/simulations')
+      if (!res.ok) throw new Error('Failed to load simulations')
+
+      const data = (await res.json()) as Array<{ id: string; name: string; createdAt: string }>
+      setSavedList(data)
+    } catch {
+      setListError('Não foi possível carregar o histórico.')
+    } finally {
+      setListLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadSimulations()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
 
@@ -167,6 +193,7 @@ export default function Home() {
       setSaving(true)
       await saveSimulation(payload)
       setSavedOk(true)
+      await loadSimulations()
     } catch (err) {
       console.error('Save failed:', err)
       setSavedOk(false)
@@ -261,6 +288,45 @@ export default function Home() {
             </div>
           </form>
         </section>
+
+        <section className="rounded-lg border p-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-medium">Simulações salvas</h2>
+
+            <button
+              type="button"
+              onClick={loadSimulations}
+              className="rounded-md border px-3 py-2 text-sm hover:bg-white/5 disabled:opacity-60"
+              disabled={listLoading}
+            >
+              {listLoading ? 'Atualizando...' : 'Atualizar'}
+            </button>
+          </div>
+
+          {listError && <p className="mt-2 text-sm text-red-600">{listError}</p>}
+
+          <div className="mt-3 space-y-2">
+            {savedList.length === 0 && !listLoading && (
+              <p className="text-sm text-muted-foreground">Nenhuma simulação salva ainda.</p>
+            )}
+
+            {savedList.map((s) => (
+              <div key={s.id} className="rounded-md border p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">{s.name}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {new Date(s.createdAt).toLocaleString('pt-BR')}
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-muted-foreground">{s.id.slice(-6)}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
 
         {fixedResult && (
           <section className="rounded-lg border p-4 space-y-4">
